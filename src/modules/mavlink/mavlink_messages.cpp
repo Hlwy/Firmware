@@ -117,6 +117,8 @@
 #include <uORB/topics/vehicle_trajectory_waypoint.h>
 #include <uORB/topics/vtol_vehicle_status.h>
 #include <uORB/topics/wind_estimate.h>
+#include <uORB/topics/wheel_encoders.h>
+#include <uORB/topics/wheel_encoders_data.h>
 
 using matrix::Vector3f;
 using matrix::wrap_2pi;
@@ -5178,6 +5180,88 @@ protected:
 	}
 };
 
+class MavlinkStreamWheelEncodersData : public MavlinkStream
+{
+public:
+	const char *get_name() const override
+	{
+		return MavlinkStreamWheelEncodersData::get_name_static();
+	}
+
+	static constexpr const char *get_name_static()
+	{
+		return "WHEEL_ENCODERS_DATA";
+	}
+
+	static constexpr uint16_t get_id_static()
+	{
+		return MAVLINK_MSG_ID_WHEEL_ENCODERS_DATA;
+	}
+
+	uint16_t get_id() override
+	{
+		return get_id_static();
+	}
+
+	static MavlinkStream *new_instance(Mavlink *mavlink)
+	{
+		return new MavlinkStreamWheelEncodersData(mavlink);
+	}
+
+	unsigned get_size() override
+	{
+		return MAVLINK_MSG_ID_WHEEL_ENCODERS_DATA_LEN + MAVLINK_NUM_NON_PAYLOAD_BYTES;
+	}
+
+private:
+	// uORB::Subscription _sub{ORB_ID(wheel_encoders_data)};
+	uORB::Subscription _sub{ORB_ID(encoders_data)};
+
+	/* do not allow top copying this class */
+	MavlinkStreamWheelEncodersData(MavlinkStreamWheelEncodersData &) = delete;
+	MavlinkStreamWheelEncodersData &operator = (const MavlinkStreamWheelEncodersData &) = delete;
+
+protected:
+	explicit MavlinkStreamWheelEncodersData(Mavlink *mavlink) : MavlinkStream(mavlink)
+	{}
+
+	bool send(const hrt_abstime t) override
+	{
+		wheel_encoders_data_s wheel_data;
+
+		if (_sub.update(&wheel_data)) {
+			mavlink_wheel_encoders_data_t msg{};
+
+			msg.time_usec = wheel_data.timestamp;
+			msg.count = 6;
+			// msg.count = wheel_data.count;
+			memcpy(msg.pulses_per_meter, wheel_data.pulses_per_meter, sizeof(msg.pulses_per_meter));
+			memcpy(msg.wheel_diameter, wheel_data.wheel_diameter, sizeof(msg.wheel_diameter));
+			memcpy(msg.position, wheel_data.position, sizeof(msg.position));
+			memcpy(msg.distance, wheel_data.distance, sizeof(msg.distance));
+			memcpy(msg.qpps, wheel_data.qpps, sizeof(msg.qpps));
+			memcpy(msg.velocity, wheel_data.velocity, sizeof(msg.velocity));
+			// msg.position[0] = wheel_data.position;
+			// msg.speed[0] = wheel_data.speed;
+
+			// for (unsigned i = 0; i < 6; i++) {
+			// 	if(wheel_data.output[i] > PWM_DEFAULT_MIN / 2) {
+			// 		if (i < n) {
+			// 			msg.controls[i] = (wheel_data.output[i] - PWM_DEFAULT_MIN) / (PWM_DEFAULT_MAX - PWM_DEFAULT_MIN);
+			// 		} else {
+			// 			msg.controls[i] = (wheel_data.output[i] - pwm_center) / ((PWM_DEFAULT_MAX - PWM_DEFAULT_MIN) / 2);
+			// 		}
+			// 	} else {
+			// 		msg.controls[i] = 0.0f;
+			// 	}
+			// }
+			mavlink_msg_wheel_encoders_data_send_struct(_mavlink->get_channel(), &msg);
+			return true;
+		}
+		return false;
+	}
+};
+
 static const StreamListItem streams_list[] = {
 	create_stream_list_item<MavlinkStreamHeartbeat>(),
 	create_stream_list_item<MavlinkStreamStatustext>(),
@@ -5241,6 +5325,7 @@ static const StreamListItem streams_list[] = {
 	create_stream_list_item<MavlinkStreamAutopilotVersion>(),
 	create_stream_list_item<MavlinkStreamProtocolVersion>(),
 	create_stream_list_item<MavlinkStreamFlightInformation>(),
+	create_stream_list_item<MavlinkStreamWheelEncodersData>(),
 	create_stream_list_item<MavlinkStreamStorageInformation>()
 };
 

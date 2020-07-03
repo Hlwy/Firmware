@@ -47,15 +47,23 @@
 #include <stdio.h>
 #include <termios.h>
 #include <lib/parameters/param.h>
+#include <uORB/uORB.h>
+#include <uORB/Publication.hpp>
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/topics/actuator_controls.h>
+#include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/wheel_encoders.h>
+#include <uORB/topics/wheel_encoders_data.h>
 #include <uORB/topics/actuator_armed.h>
 #include <uORB/topics/parameter_update.h>
 #include <drivers/device/i2c.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <stdarg.h>
+
+#define SetDWORDval(arg) (uint8_t)(((uint32_t)arg)>>24),(uint8_t)(((uint32_t)arg)>>16),(uint8_t)(((uint32_t)arg)>>8),(uint8_t)arg
+#define SetWORDval(arg) (uint8_t)(((uint16_t)arg)>>8),(uint8_t)arg
 
 /**
  * This is a driver for the RoboClaw motor controller
@@ -125,38 +133,41 @@ public:
 	int turn(float value);
 
 	/**
-	 * reset the encoders
-	 * @return status
-	 */
+	* reset the encoders
+	* @return status
+	*/
 	int resetEncoders();
 
 	/**
-	 * read data from serial
-	 */
+	* read data from serial
+	*/
 	int readEncoder();
 
 	/**
-	 * print status
-	 */
+	* print status
+	*/
 	void printStatus(char *string, size_t n);
 
+	int open_serial_port(const char *port, speed_t baud);
 private:
+	uint16_t _crc;
+	void crc_clear();
+	uint16_t crc_get();
+	void crc_update(uint8_t data);
+	static uint16_t _calcCRC(const uint8_t *buf, size_t n, uint16_t init = 0, bool verbose = false);
 
 	// commands
 	// We just list the commands we want from the manual here.
 	enum e_command {
-
 		// simple
 		CMD_DRIVE_FWD_1 = 0,
 		CMD_DRIVE_REV_1 = 1,
 		CMD_DRIVE_FWD_2 = 4,
 		CMD_DRIVE_REV_2 = 5,
-
 		CMD_DRIVE_FWD_MIX = 8,
 		CMD_DRIVE_REV_MIX = 9,
 		CMD_TURN_RIGHT = 10,
 		CMD_TURN_LEFT = 11,
-
 		// encoder commands
 		CMD_READ_ENCODER_1 = 16,
 		CMD_READ_ENCODER_2 = 17,
@@ -165,13 +176,12 @@ private:
 		CMD_RESET_ENCODERS = 20,
 		CMD_READ_BOTH_ENCODERS = 78,
 		CMD_READ_BOTH_SPEEDS = 79,
-
 		// advanced motor control
 		CMD_READ_SPEED_HIRES_1 = 30,
 		CMD_READ_SPEED_HIRES_2 = 31,
 		CMD_SIGNED_DUTYCYCLE_1 = 32,
 		CMD_SIGNED_DUTYCYCLE_2 = 33,
-
+		// status
 		CMD_READ_STATUS = 90
 	};
 
@@ -197,7 +207,7 @@ private:
 
 	/** actuator controls subscription */
 	int _actuatorsSub{-1};
-	actuator_controls_s _actuatorControls;
+	actuator_outputs_s _actuatorControls;
 
 	int _armedSub{-1};
 	actuator_armed_s _actuatorArmed;
@@ -205,16 +215,19 @@ private:
 	int _paramSub{-1};
 	parameter_update_s _paramUpdate;
 
-	uORB::PublicationMulti<wheel_encoders_s> _wheelEncodersAdv[2] { ORB_ID(wheel_encoders), ORB_ID(wheel_encoders)};
-	wheel_encoders_s _wheelEncoderMsg[2];
+	// uORB::Publication<wheel_encoders_data_s> _wheelEncodersAdv { ORB_ID(wheel_encoders_data)};
+	// uORB::PublicationMulti<wheel_encoders_data_s> _wheelEncodersAdv { ORB_ID(wheel_encoders)};
+	orb_advert_t _wheelEncodersAdv { nullptr};
+	orb_advert_t _encoder_data_pub{nullptr};
+	wheel_encoders_data_s _wheelEncoderMsg;
 
 	uint32_t _lastEncoderCount[2] {0, 0};
 	int64_t _encoderCounts[2] {0, 0};
 	int32_t _motorSpeeds[2] {0, 0};
 
+
 	void _parameters_update();
 
-	static uint16_t _calcCRC(const uint8_t *buf, size_t n, uint16_t init = 0);
 	int _sendUnsigned7Bit(e_command command, float data);
 	int _sendSigned16Bit(e_command command, float data);
 	int _sendNothing(e_command);

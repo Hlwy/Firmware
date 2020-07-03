@@ -61,9 +61,11 @@
 // The RoboClaw has a serial communication timeout of 10ms.
 // Add a little extra to account for timing inaccuracy
 #define TIMEOUT_US 10500
+#define DEFAULT_WHEEL_DIAMETER 0.1905
+#define DEFAULT_MOTOR_COUNT 6
 
 // If a timeout occurs during serial communication, it will immediately try again this many times
-#define TIMEOUT_RETRIES 1
+#define TIMEOUT_RETRIES 3
 
 // If a timeout occurs while disarmed, it will try again this many times. This should be a higher number,
 // because stopping when disarmed is pretty important.
@@ -78,48 +80,36 @@
 bool RoboClaw::taskShouldExit = false;
 
 RoboClaw::RoboClaw(const char *deviceName, const char *baudRateParam):
-	_uart(0),
-	_uart_set(),
-	_uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US},
-	_actuatorsSub(-1),
-	_lastEncoderCount{0, 0},
-	_encoderCounts{0, 0},
-	_motorSpeeds{0, 0}
-
+	_uart(0), _uart_set(), _uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US}
 {
+	printf("Roboclaw starting...\n");
 	_param_handles.actuator_write_period_ms = 	param_find("RBCLW_WRITE_PER");
 	_param_handles.encoder_read_period_ms = 	param_find("RBCLW_READ_PER");
 	_param_handles.counts_per_rev = 			param_find("RBCLW_COUNTS_REV");
 	_param_handles.serial_baud_rate = 			param_find(baudRateParam);
-	_param_handles.address = 					param_find("RBCLW_ADDRESS");
-
+	_param_handles.address = 				param_find("RBCLW_ADDRESS");
 	_parameters_update();
 
+	int tmpBaud;
+	param_get(_param_handles.serial_baud_rate, &tmpBaud);
+	printf("Roboclaw parameters updated:\n");
+	printf(" -- RBCLW_PORT         = %s\n", deviceName);
+	printf(" -- RBCLW_ADDRESS      = %d\n", int(_parameters.address));
+	printf(" -- RBCLW_BAUD         = %d\n", tmpBaud);
+	printf(" -- RBCLW_WRITE_PER    = %d\n", int(_parameters.actuator_write_period_ms));
+	printf(" -- RBCLW_READ_PER     = %d\n", int(_parameters.encoder_read_period_ms));
+	printf(" -------------------------- \n");
+	printf("  \n");
 	// start serial port
-	_uart = open(deviceName, O_RDWR | O_NOCTTY);
-
-	if (_uart < 0) { err(1, "could not open %s", deviceName); }
-
-	int ret = 0;
-	struct termios uart_config {};
-	ret = tcgetattr(_uart, &uart_config);
-
-	if (ret < 0) { err(1, "failed to get attr"); }
-
-	uart_config.c_oflag &= ~ONLCR; // no CR for every LF
-	ret = cfsetispeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set input speed"); }
-
-	ret = cfsetospeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set output speed"); }
-
-	ret = tcsetattr(_uart, TCSANOW, &uart_config);
-
-	if (ret < 0) { err(1, "failed to set attr"); }
-
-	FD_ZERO(&_uart_set);
+	int err = this->open_serial_port(deviceName, B38400);
+	switch(err){
+		case -1: err(1, "could not open %s", deviceName); break;
+		case -2: err(1, "failed to get attr"); break;
+		case -3: err(1, "failed to set input speed"); break;
+		case -4: err(1, "failed to set output speed"); break;
+		case -5: err(1, "failed to set attr"); break;
+	}
+	if(err >= 0) printf("Roboclaw port successfully created.\n");
 
 	// setup default settings, reset encoders
 	resetEncoders();
@@ -127,21 +117,46 @@ RoboClaw::RoboClaw(const char *deviceName, const char *baudRateParam):
 
 RoboClaw::~RoboClaw()
 {
+	// Unadvertise the distance sensor topic.
+	if (_encoder_data_pub != nullptr) {
+		orb_unadvertise(_encoder_data_pub);
+	}
 	setMotorDutyCycle(MOTOR_1, 0.0);
 	setMotorDutyCycle(MOTOR_2, 0.0);
 	close(_uart);
+}
+
+int RoboClaw::open_serial_port(const char* port, speed_t baud){
+	int ret = 0;
+	struct termios uart_config{};
+
+	_uart = open(port, O_RDWR | O_NOCTTY | O_NDELAY);
+	if(_uart < 0){ return -1; }
+	ret = tcgetattr(_uart, &uart_config);
+	if(ret < 0){ return -2; }
+
+	// Configure serial port options
+	uart_config.c_oflag &= ~ONLCR; // no CR for every LF
+	// uart_config.c_cflag &= ~HUPCL;
+	// uart_config.c_lflag &= ~ICANON;
+
+	ret = cfsetispeed(&uart_config, baud);
+	if(ret < 0){ return -3; }
+	ret = cfsetospeed(&uart_config, baud);
+	if(ret < 0){ return -4; }
+	// Apply serial port configuration
+	ret = tcsetattr(_uart, TCSANOW, &uart_config);
+	if(ret < 0){ return -5; }
+	FD_ZERO(&_uart_set);
+	return ret;
 }
 
 void RoboClaw::taskMain()
 {
 	// Make sure the Roboclaw is actually connected, so I don't just spam errors if it's not.
 	uint8_t rbuff[4];
-	int err_code = _transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
-
-	if (err_code <= 0) {
-		PX4_ERR("Unable to connect to Roboclaw. Shutting down Roboclaw driver.");
-		return;
-	}
+	// int err_code = _transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
+	_transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
 
 	// This main loop performs two different tasks, asynchronously:
 	// - Send actuator_controls_0 to the Roboclaw as soon as they are available
@@ -151,12 +166,11 @@ void RoboClaw::taskMain()
 	// It is updated at the end of every loop. Sometimes, if the actuator_controls_0 message came in right before
 	// I should have read the encoders, waitTime will be 0. This is fine. When waitTime is 0, poll() will return
 	// immediately with a timeout. (Or possibly with a message, if one happened to be available at that exact moment)
+	uint64_t actuatorsLastWritten = 0;
 	uint64_t encoderTaskLastRun = 0;
 	int waitTime = 0;
 
-	uint64_t actuatorsLastWritten = 0;
-
-	_actuatorsSub = orb_subscribe(ORB_ID(actuator_controls_0));
+	_actuatorsSub = orb_subscribe(ORB_ID(actuator_outputs));
 	orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
 
 	_armedSub = orb_subscribe(ORB_ID(actuator_armed));
@@ -170,28 +184,43 @@ void RoboClaw::taskMain()
 	fds[2].fd = _armedSub;
 	fds[2].events = POLLIN;
 
-	memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
-	_wheelEncoderMsg[0].pulses_per_rev = _parameters.counts_per_rev;
-	_wheelEncoderMsg[1].pulses_per_rev = _parameters.counts_per_rev;
+	// memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
+	// _wheelEncoderMsg[0].pulses_per_rev = _parameters.counts_per_rev;
+	// _wheelEncoderMsg[1].pulses_per_rev = _parameters.counts_per_rev;
+	// memset((void *) &_wheelEncoderMsg, 0, sizeof(_wheelEncoderMsg));
+	// for(int i = 0; i < DEFAULT_MOTOR_COUNT; i++){
+	// 	_wheelEncoderMsg.pulses_per_meter[i] = (uint32_t) _parameters.counts_per_rev;
+	// 	_wheelEncoderMsg.wheel_diameter[i] = DEFAULT_WHEEL_DIAMETER;
+	// 	_wheelEncoderMsg.position[i] = 0;
+	// 	_wheelEncoderMsg.qpps[i] = 0;
+	// 	_wheelEncoderMsg.distance[i] = 0.0;
+	// 	_wheelEncoderMsg.velocity[i] = 0.0;
+	// }
+	// for(int i = 0; i < DEFAULT_MOTOR_COUNT; i++){
+	// 	_wheelEncoderMsg.pulses_per_meter[i] = (uint32_t) _parameters.counts_per_rev;
+	// 	_wheelEncoderMsg.wheel_diameter[i] = DEFAULT_WHEEL_DIAMETER;
+	// 	_wheelEncoderMsg.position[i] = _encoderCounts[i];
+	// 	_wheelEncoderMsg.qpps[i] = _motorSpeeds[i];
+	// 	_wheelEncoderMsg.distance[i] = (float) ((int32_t) _encoderCounts[i]) / (float) _wheelEncoderMsg.pulses_per_meter[i];
+	// 	_wheelEncoderMsg.velocity[i] = (float) ((int32_t) _motorSpeeds[i]) / (float) _wheelEncoderMsg.pulses_per_meter[i];
+	// }
 
 	while (!taskShouldExit) {
-
 		int pret = poll(fds, sizeof(fds) / sizeof(pollfd), waitTime / 1000);
-
 		bool actuators_timeout = int(hrt_absolute_time() - actuatorsLastWritten) > 2000 * _parameters.actuator_write_period_ms;
 
 		if (fds[0].revents & POLLIN) {
 			orb_copy(ORB_ID(parameter_update), _paramSub, &_paramUpdate);
 			_parameters_update();
 		}
+		if(_parameters.counts_per_rev == 0) _parameters.counts_per_rev = 1;
 
 		// No timeout, update on either the actuator controls or the armed state
 		if (pret > 0 && (fds[1].revents & POLLIN || fds[2].revents & POLLIN || actuators_timeout)) {
-			orb_copy(ORB_ID(actuator_controls_0), _actuatorsSub, &_actuatorControls);
+			orb_copy(ORB_ID(actuator_outputs), _actuatorsSub, &_actuatorControls);
 			orb_copy(ORB_ID(actuator_armed), _armedSub, &_actuatorArmed);
 
 			int drive_ret = 0, turn_ret = 0;
-
 			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown
 					      || _actuatorArmed.force_failsafe || actuators_timeout;
 
@@ -206,8 +235,8 @@ void RoboClaw::taskMain()
 				}
 
 			} else {
-				drive_ret = drive(_actuatorControls.control[actuator_controls_s::INDEX_THROTTLE]);
-				turn_ret = turn(_actuatorControls.control[actuator_controls_s::INDEX_YAW]);
+				drive_ret = drive(_actuatorControls.output[0]);
+				turn_ret = turn(_actuatorControls.output[1]);
 
 				if (drive_ret <= 0 || turn_ret <= 0) {
 					PX4_ERR("Error controlling RoboClaw. Drive err: %d. Turn err: %d", drive_ret, turn_ret);
@@ -220,20 +249,59 @@ void RoboClaw::taskMain()
 			// A timeout occurred, which means that it's time to update the encoders
 			encoderTaskLastRun = hrt_absolute_time();
 
+			wheel_encoders_data_s encoder_data;
+			encoder_data.timestamp = encoderTaskLastRun;
 			if (readEncoder() > 0) {
+				// _wheelEncoderMsg.timestamp = encoderTaskLastRun;
+				// for(int i = 0; i < 2; i++){
+				// 	// tmpMsg.wheel_diameter[i] = DEFAULT_WHEEL_DIAMETER;
+				// 	_wheelEncoderMsg.pulses_per_meter[i] = (uint32_t) _parameters.counts_per_rev;
+				// 	_wheelEncoderMsg.position[i] = _encoderCounts[i];
+				// 	_wheelEncoderMsg.qpps[i] = _motorSpeeds[i];
+				// 	_wheelEncoderMsg.distance[i] = (float) ((int32_t) _encoderCounts[i]) / (float) _wheelEncoderMsg.pulses_per_meter[i];
+				// 	_wheelEncoderMsg.velocity[i] = (float) ((int32_t) _motorSpeeds[i]) / (float) _wheelEncoderMsg.pulses_per_meter[i];
+				// }
+				// // _wheelEncodersAdv.publish(_wheelEncoderMsg);
+				// if (_wheelEncodersAdv == nullptr) {
+				// 	int instance;
+				// 	_wheelEncodersAdv = orb_advertise(ORB_ID(wheel_encoders_data), &_wheelEncoderMsg, &instance, ORB_PRIO_DEFAULT);
+				// 	PX4_INFO("Roboclaw encoders uorb topic \'wheel_encoders_data\' was advertised.");
+				// } else {
+				// 	// printf("pos1,spd1,pos2,spd2: %10.2f %10.2f %10.2f %10.2f\n", double(getMotorPosition(MOTOR_1)), double(getMotorSpeed(MOTOR_1)), double(getMotorPosition(MOTOR_2)), double(getMotorSpeed(MOTOR_2)));
+				// 	orb_publish(ORB_ID(wheel_encoders_data), _wheelEncodersAdv, &_wheelEncoderMsg);
+				// 	PX4_INFO("Roboclaw encoders uorb topic \'wheel_encoders_data\' was published");
+				// }
 
-				for (int i = 0; i < 2; i++) {
-					_wheelEncoderMsg[i].timestamp = encoderTaskLastRun;
-
-					_wheelEncoderMsg[i].encoder_position = _encoderCounts[i];
-					_wheelEncoderMsg[i].speed = _motorSpeeds[i];
-
-					_wheelEncodersAdv[i].publish(_wheelEncoderMsg[i]);
+				for(int i = 0; i < 2; i++){
+					encoder_data.wheel_diameter[i] = DEFAULT_WHEEL_DIAMETER;
+					encoder_data.pulses_per_meter[i] = (uint32_t) _parameters.counts_per_rev;
+					encoder_data.position[i] = _encoderCounts[i];
+					encoder_data.qpps[i] = _motorSpeeds[i];
+					encoder_data.distance[i] = (float) ((int32_t) _encoderCounts[i]) / (float) encoder_data.pulses_per_meter[i];
+					encoder_data.velocity[i] = (float) ((int32_t) _motorSpeeds[i]) / (float) encoder_data.pulses_per_meter[i];
 				}
-
+				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' encoder data was updated successfully");
+				int instance_id;
+				orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
+				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published");
 			} else {
 				PX4_ERR("Error reading encoders");
+				for(int i = 0; i < 2; i++){
+					encoder_data.wheel_diameter[i] = DEFAULT_WHEEL_DIAMETER;
+					encoder_data.pulses_per_meter[i] = (uint32_t) _parameters.counts_per_rev;
+					encoder_data.position[i] = 0;
+					encoder_data.qpps[i] = 0;
+					encoder_data.distance[i] = (float) ((int32_t) 0) / (float) encoder_data.pulses_per_meter[i];
+					encoder_data.velocity[i] = (float) ((int32_t) 0) / (float) encoder_data.pulses_per_meter[i];
+				}
+				// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' encoder data was updated successfully");
+				int instance_id;
+				orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
+				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published with null values");
 			}
+			// int instance_id;
+			// orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
+			// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was AUTO published");
 		}
 
 		waitTime = _parameters.encoder_read_period_ms * 1000 - (hrt_absolute_time() - encoderTaskLastRun);
@@ -428,12 +496,8 @@ int RoboClaw::_sendUnsigned7Bit(e_command command, float data)
 
 int RoboClaw::_sendSigned16Bit(e_command command, float data)
 {
-	if (data > 1.0f) {
-		data = 1.0f;
-
-	} else if (data < -1.0f) {
-		data = -1.0f;
-	}
+	if(data > 1.0f){ data = 1.0f; }
+	else if(data < -1.0f){ data = -1.0f; }
 
 	auto buff = (uint16_t)(data * INT16_MAX);
 	uint8_t recv_buff;
@@ -446,114 +510,123 @@ int RoboClaw::_sendNothing(e_command command)
 	return _transaction(command, nullptr, 0, &recv_buff, 1);
 }
 
-uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init)
-{
+void RoboClaw::crc_clear(){ _crc = 0; }
+uint16_t RoboClaw::crc_get(){ return _crc; }
+void RoboClaw::crc_update(const uint8_t data){
+	_crc = _crc ^ ((uint16_t)data << 8);
+	for(int i = 0;i < 8;i++){
+		if(_crc & 0x8000) _crc = (_crc << 1) ^ 0x1021;
+		else _crc <<= 1;
+	}
+}
+uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init, bool verbose){
 	uint16_t crc = init;
-
-	for (size_t byte = 0; byte < n; byte++) {
+	if(verbose) printf("[INFO] _calcCRC() --- %d", (int)crc);
+	for (uint8_t byte = 0; byte < n; byte++) {
+		if(verbose) printf(" %d", (int)buf[byte]);
 		crc = crc ^ (((uint16_t) buf[byte]) << 8);
-
 		for (uint8_t bit = 0; bit < 8; bit++) {
-			if (crc & 0x8000) {
-				crc = (crc << 1) ^ 0x1021;
-
-			} else {
-				crc = crc << 1;
-			}
+			if (crc & 0x8000) { crc = (crc << 1) ^ 0x1021;
+			} else { crc = crc << 1; }
 		}
 	}
-
 	return crc;
 }
 
 int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
-			   uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
+	uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
 {
 	int err_code = 0;
-
-	// WRITE
-
+	crc_clear();
 	tcflush(_uart, TCIOFLUSH); // flush  buffers
+	// WRITE
 	uint8_t buf[wbytes + 4];
 	buf[0] = (uint8_t) _parameters.address;
 	buf[1] = cmd;
+	crc_update((uint8_t) _parameters.address);
+	crc_update(cmd);
 
-	if (wbuff) {
-		memcpy(&buf[2], wbuff, wbytes);
-	}
-
+	if(wbuff){ memcpy(&buf[2], wbuff, wbytes); }
 	wbytes = wbytes + (send_checksum ? 4 : 2);
-
-	if (send_checksum) {
+	if(send_checksum){
 		uint16_t sum = _calcCRC(buf, wbytes - 2);
 		buf[wbytes - 2] = (sum >> 8) & 0xFF;
 		buf[wbytes - 1] = sum & 0xFFu;
 	}
-
 	int count = write(_uart, buf, wbytes);
-
-	if (count < (int) wbytes) { // Did not successfully send all bytes.
+	if(count < (int) wbytes){ // Did not successfully send all bytes.
 		PX4_ERR("Only wrote %d out of %d bytes", count, (int) wbytes);
 		return -1;
+	} else{
+		// printf(" - Wrote %d bytes --", count);
+		// for(int i = 0; i < count; i++){ printf(" %#04x", buf[i]); } printf("\n");
 	}
 
 	// READ
-
+	size_t bytes_read = 0;
+	uint8_t *rbuff_curr = rbuff;
 	FD_ZERO(&_uart_set);
 	FD_SET(_uart, &_uart_set);
 
-	uint8_t *rbuff_curr = rbuff;
-	size_t bytes_read = 0;
-
 	// select(...) returns as soon as even 1 byte is available. read(...) returns immediately, no matter how many
 	// bytes are available. I need to keep reading until I get the number of bytes I expect.
-	while (bytes_read < rbytes) {
+	while(bytes_read < rbytes){
 		// select(...) may change this timeout struct (because it is not const). So I reset it every time.
 		_uart_timeout.tv_sec = 0;
 		_uart_timeout.tv_usec = TIMEOUT_US;
 		err_code = select(_uart + 1, &_uart_set, nullptr, nullptr, &_uart_timeout);
 
 		// An error code of 0 means that select timed out, which is how the Roboclaw indicates an error.
-		if (err_code <= 0) {
+		if(err_code <= 0) {
+			printf(" -- Error during read = %d.\n", err_code);
 			return err_code;
 		}
 
-		err_code = read(_uart, rbuff_curr, rbytes - bytes_read);
-
-		if (err_code <= 0) {
+		size_t nBytes = rbytes - bytes_read;
+		err_code = read(_uart, rbuff_curr, nBytes);
+		// printf(" ---- reading for %d bytes...\n", int(nBytes));
+		if(err_code <= 0) {
+			printf(" ---- Error during 2nd read = %d.\n", err_code);
 			return err_code;
-
-		} else {
+		} else{
 			bytes_read += err_code;
 			rbuff_curr += err_code;
+			// printf(" ---- Read returned = %d byte(s) = %d (%#04x).\n", err_code, int(rbuff[bytes_read]), rbuff[bytes_read]);
 		}
 	}
-
 	//TODO: Clean up this mess of IFs and returns
-
-	if (recv_checksum) {
-		if (bytes_read < 2) {
-			return -1;
-		}
+	if(recv_checksum){
+		if(bytes_read < 2){ printf(" -- Unable to read 2 bytes.\n"); return -1; }
 
 		// The checksum sent back by the roboclaw is calculated based on the address and command bytes as well
 		// as the data returned.
 		uint16_t checksum_calc = _calcCRC(buf, 2);
-		checksum_calc = _calcCRC(rbuff, bytes_read - 2, checksum_calc);
-		uint16_t checksum_recv = (rbuff[bytes_read - 2] << 8) + rbuff[bytes_read - 1];
-
-		if (checksum_calc == checksum_recv) {
+		checksum_calc = _calcCRC(rbuff_curr, bytes_read - 2, checksum_calc);
+		// printf(" -- Checksum original -- (%d or %#08x).\n", (int)checksum_calc, checksum_calc);
+		// uint16_t checksum_calc2 = crc_get();
+		// printf(" -- Checksum test -- (%d or %#08x).\n", (int)checksum_calc2, checksum_calc2);
+		uint16_t checksum_recv = (rbuff_curr[bytes_read - 2] << 8) + rbuff_curr[bytes_read - 1];
+		// printf(" ---- Received bytes ->");
+		// for(int i = 0; i < (int) bytes_read;i++){
+		// 	printf("  %d (%#04x),", (int) rbuff_curr[i], rbuff_curr[i]);
+		// }
+		// printf("\n");
+		if(checksum_calc == checksum_recv){
+			// printf(" -- Successfully read %d bytes.\n",bytes_read);
 			return bytes_read;
-
 		} else {
+			// printf(" -- Checksum recieved (%d or %#08x) doesn't match expected checksum (%d or %#08x).\n",
+			// 	(int)checksum_recv, checksum_recv,
+			// 	(int)checksum_calc, checksum_calc
+			// );
 			return -10;
 		}
-
-	} else {
-		if (bytes_read == 1 && rbuff[0] == 0xFF) {
+	} else{
+		if(bytes_read == 1 && rbuff[0] == 0xFF){
+			// printf(" -- Successfully read 1 byte.\n");
 			return 1;
-
-		} else {
+		} else{
+			printf(" -- Unknown error = -11.\n");
 			return -11;
 		}
 	}

@@ -77,9 +77,9 @@
 // Number of bytes for commands 18 and 19, read speeds.
 #define ENCODER_SPEED_MESSAGE_SIZE 7
 
-bool RoboClaw::taskShouldExit = false;
+bool RoboClawAlt::taskShouldExit = false;
 
-RoboClaw::RoboClaw(const char *deviceName, const char *baudRateParam):
+RoboClawAlt::RoboClawAlt(const char *deviceName, const char *baudRateParam):
 	_uart(0), _uart_set(), _uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US}
 {
 	printf("Roboclaw starting...\n");
@@ -115,7 +115,7 @@ RoboClaw::RoboClaw(const char *deviceName, const char *baudRateParam):
 	resetEncoders();
 }
 
-RoboClaw::~RoboClaw()
+RoboClawAlt::~RoboClawAlt()
 {
 	// Unadvertise the distance sensor topic.
 	if (_encoder_data_pub != nullptr) {
@@ -126,7 +126,7 @@ RoboClaw::~RoboClaw()
 	close(_uart);
 }
 
-int RoboClaw::open_serial_port(const char* port, speed_t baud){
+int RoboClawAlt::open_serial_port(const char* port, speed_t baud){
 	int ret = 0;
 	struct termios uart_config{};
 
@@ -151,7 +151,7 @@ int RoboClaw::open_serial_port(const char* port, speed_t baud){
 	return ret;
 }
 
-void RoboClaw::taskMain()
+void RoboClawAlt::taskMain()
 {
 	// Make sure the Roboclaw is actually connected, so I don't just spam errors if it's not.
 	uint8_t rbuff[4];
@@ -280,10 +280,10 @@ void RoboClaw::taskMain()
 					encoder_data.distance[i] = (float) ((int32_t) _encoderCounts[i]) / (float) encoder_data.pulses_per_meter[i];
 					encoder_data.velocity[i] = (float) ((int32_t) _motorSpeeds[i]) / (float) encoder_data.pulses_per_meter[i];
 				}
-				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' encoder data was updated successfully");
+				// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' encoder data was updated successfully");
 				int instance_id;
 				orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
-				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published");
+				// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published");
 			} else {
 				PX4_ERR("Error reading encoders");
 				for(int i = 0; i < 2; i++){
@@ -297,7 +297,7 @@ void RoboClaw::taskMain()
 				// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' encoder data was updated successfully");
 				int instance_id;
 				orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
-				PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published with null values");
+				// PX4_INFO("Roboclaw encoders uorb topic \'encoders_data\' was published with null values");
 			}
 			// int instance_id;
 			// orb_publish_auto(ORB_ID(encoders_data), &_encoder_data_pub, &encoder_data, &instance_id, ORB_PRIO_DEFAULT);
@@ -313,7 +313,7 @@ void RoboClaw::taskMain()
 	orb_unsubscribe(_paramSub);
 }
 
-int RoboClaw::readEncoder()
+int RoboClawAlt::readEncoder()
 {
 
 	uint8_t rbuff_pos[ENCODER_MESSAGE_SIZE];
@@ -380,7 +380,7 @@ int RoboClaw::readEncoder()
 	return 1;
 }
 
-void RoboClaw::printStatus(char *string, size_t n)
+void RoboClawAlt::printStatus(char *string, size_t n)
 {
 	snprintf(string, n, "pos1,spd1,pos2,spd2: %10.2f %10.2f %10.2f %10.2f\n",
 		 double(getMotorPosition(MOTOR_1)),
@@ -389,7 +389,7 @@ void RoboClaw::printStatus(char *string, size_t n)
 		 double(getMotorSpeed(MOTOR_2)));
 }
 
-float RoboClaw::getMotorPosition(e_motor motor)
+float RoboClawAlt::getMotorPosition(e_motor motor)
 {
 	if (motor == MOTOR_1) {
 		return _encoderCounts[0];
@@ -398,12 +398,12 @@ float RoboClaw::getMotorPosition(e_motor motor)
 		return _encoderCounts[1];
 
 	} else {
-		warnx("Unknown motor value passed to RoboClaw::getMotorPosition");
+		warnx("Unknown motor value passed to RoboClawAlt::getMotorPosition");
 		return NAN;
 	}
 }
 
-float RoboClaw::getMotorSpeed(e_motor motor)
+float RoboClawAlt::getMotorSpeed(e_motor motor)
 {
 	if (motor == MOTOR_1) {
 		return _motorSpeeds[0];
@@ -412,12 +412,12 @@ float RoboClaw::getMotorSpeed(e_motor motor)
 		return _motorSpeeds[1];
 
 	} else {
-		warnx("Unknown motor value passed to RoboClaw::getMotorPosition");
+		warnx("Unknown motor value passed to RoboClawAlt::getMotorPosition");
 		return NAN;
 	}
 }
 
-int RoboClaw::setMotorSpeed(e_motor motor, float value)
+int RoboClawAlt::setMotorSpeed(e_motor motor, float value)
 {
 	e_command command;
 
@@ -445,7 +445,7 @@ int RoboClaw::setMotorSpeed(e_motor motor, float value)
 	return _sendUnsigned7Bit(command, value);
 }
 
-int RoboClaw::setMotorDutyCycle(e_motor motor, float value)
+int RoboClawAlt::setMotorDutyCycle(e_motor motor, float value)
 {
 
 	e_command command;
@@ -464,24 +464,24 @@ int RoboClaw::setMotorDutyCycle(e_motor motor, float value)
 	return _sendSigned16Bit(command, value);
 }
 
-int RoboClaw::drive(float value)
+int RoboClawAlt::drive(float value)
 {
 	e_command command = value >= 0 ? CMD_DRIVE_FWD_MIX : CMD_DRIVE_REV_MIX;
 	return _sendUnsigned7Bit(command, value);
 }
 
-int RoboClaw::turn(float value)
+int RoboClawAlt::turn(float value)
 {
 	e_command command = value >= 0 ? CMD_TURN_LEFT : CMD_TURN_RIGHT;
 	return _sendUnsigned7Bit(command, value);
 }
 
-int RoboClaw::resetEncoders()
+int RoboClawAlt::resetEncoders()
 {
 	return _sendNothing(CMD_RESET_ENCODERS);
 }
 
-int RoboClaw::_sendUnsigned7Bit(e_command command, float data)
+int RoboClawAlt::_sendUnsigned7Bit(e_command command, float data)
 {
 	data = fabs(data);
 
@@ -494,7 +494,7 @@ int RoboClaw::_sendUnsigned7Bit(e_command command, float data)
 	return _transaction(command, &byte, 1, &recv_byte, 1);
 }
 
-int RoboClaw::_sendSigned16Bit(e_command command, float data)
+int RoboClawAlt::_sendSigned16Bit(e_command command, float data)
 {
 	if(data > 1.0f){ data = 1.0f; }
 	else if(data < -1.0f){ data = -1.0f; }
@@ -504,22 +504,22 @@ int RoboClaw::_sendSigned16Bit(e_command command, float data)
 	return _transaction(command, (uint8_t *) &buff, 2, &recv_buff, 1);
 }
 
-int RoboClaw::_sendNothing(e_command command)
+int RoboClawAlt::_sendNothing(e_command command)
 {
 	uint8_t recv_buff;
 	return _transaction(command, nullptr, 0, &recv_buff, 1);
 }
 
-void RoboClaw::crc_clear(){ _crc = 0; }
-uint16_t RoboClaw::crc_get(){ return _crc; }
-void RoboClaw::crc_update(const uint8_t data){
+void RoboClawAlt::crc_clear(){ _crc = 0; }
+uint16_t RoboClawAlt::crc_get(){ return _crc; }
+void RoboClawAlt::crc_update(const uint8_t data){
 	_crc = _crc ^ ((uint16_t)data << 8);
 	for(int i = 0;i < 8;i++){
 		if(_crc & 0x8000) _crc = (_crc << 1) ^ 0x1021;
 		else _crc <<= 1;
 	}
 }
-uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init, bool verbose){
+uint16_t RoboClawAlt::_calcCRC(const uint8_t *buf, size_t n, uint16_t init, bool verbose){
 	uint16_t crc = init;
 	if(verbose) printf("[INFO] _calcCRC() --- %d", (int)crc);
 	for (uint8_t byte = 0; byte < n; byte++) {
@@ -533,7 +533,7 @@ uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init, bool ve
 	return crc;
 }
 
-int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
+int RoboClawAlt::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 	uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
 {
 	int err_code = 0;
@@ -632,7 +632,7 @@ int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 	}
 }
 
-void RoboClaw::_parameters_update()
+void RoboClawAlt::_parameters_update()
 {
 	param_get(_param_handles.counts_per_rev, &_parameters.counts_per_rev);
 	param_get(_param_handles.encoder_read_period_ms, &_parameters.encoder_read_period_ms);

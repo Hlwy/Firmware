@@ -119,6 +119,7 @@
 #include <uORB/topics/wind_estimate.h>
 #include <uORB/topics/wheel_encoders.h>
 #include <uORB/topics/wheel_encoders_data.h>
+#include <v2.0/common/mavlink.h>
 
 using matrix::Vector3f;
 using matrix::wrap_2pi;
@@ -5215,7 +5216,7 @@ public:
 
 private:
 	// uORB::Subscription _sub{ORB_ID(wheel_encoders_data)};
-	uORB::Subscription _sub{ORB_ID(encoders_data)};
+	uORB::Subscription _encoders_data_sub{ORB_ID(encoders_data)};
 
 	/* do not allow top copying this class */
 	MavlinkStreamWheelEncodersData(MavlinkStreamWheelEncodersData &) = delete;
@@ -5229,7 +5230,7 @@ protected:
 	{
 		wheel_encoders_data_s wheel_data;
 
-		if (_sub.update(&wheel_data)) {
+		if (_encoders_data_sub.update(&wheel_data)) {
 			mavlink_wheel_encoders_data_t msg{};
 
 			msg.time_usec = wheel_data.timestamp;
@@ -5241,21 +5242,8 @@ protected:
 			memcpy(msg.distance, wheel_data.distance, sizeof(msg.distance));
 			memcpy(msg.qpps, wheel_data.qpps, sizeof(msg.qpps));
 			memcpy(msg.velocity, wheel_data.velocity, sizeof(msg.velocity));
-			// msg.position[0] = wheel_data.position;
-			// msg.speed[0] = wheel_data.speed;
-
-			// for (unsigned i = 0; i < 6; i++) {
-			// 	if(wheel_data.output[i] > PWM_DEFAULT_MIN / 2) {
-			// 		if (i < n) {
-			// 			msg.controls[i] = (wheel_data.output[i] - PWM_DEFAULT_MIN) / (PWM_DEFAULT_MAX - PWM_DEFAULT_MIN);
-			// 		} else {
-			// 			msg.controls[i] = (wheel_data.output[i] - pwm_center) / ((PWM_DEFAULT_MAX - PWM_DEFAULT_MIN) / 2);
-			// 		}
-			// 	} else {
-			// 		msg.controls[i] = 0.0f;
-			// 	}
-			// }
 			mavlink_msg_wheel_encoders_data_send_struct(_mavlink->get_channel(), &msg);
+			// printf("MavlinkStreamWheelEncodersData() -- MAVLINK MESSAGE SENT\n");
 			return true;
 		}
 		return false;

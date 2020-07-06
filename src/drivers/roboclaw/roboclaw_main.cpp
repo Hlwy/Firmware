@@ -43,32 +43,32 @@
  *
  */
 
-#include <px4_platform_common/px4_config.h>
-#include <px4_platform_common/log.h>
-#include <px4_platform_common/module.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h> // strcmp
+ #include <px4_platform_common/module.h>
 
-#include <parameters/param.h>
+ #include <systemlib/err.h> // errx
+ #include <parameters/param.h>
+ #include "PxRoboclawDevice.hpp"
+ #include "RoboclawDriver.h"
+ #include "RoboClaw.hpp"
 
+volatile static bool thread_should_exit = false; // Daemon exit flag
+volatile static bool thread_running = false; // Daemon status flag
+volatile static bool test_thread_running = false; // Daemon status flag
+volatile static int daemon_task; // Handle of deamon task / thread
 
-#include "RoboClaw.hpp"
-
-static bool thread_running = false;     /**< Deamon status flag */
-px4_task_t deamon_task;
 
 /**
  * Deamon management function.
  */
 extern "C" __EXPORT int roboclaw_main(int argc, char *argv[]);
-
 /**
  * Mainloop of deamon.
  */
 int roboclaw_thread_main(int argc, char *argv[]);
+int roboclaw_test_main(int argc, char *argv[]);
 
 /**
  * Print the correct usage.
@@ -130,6 +130,7 @@ All available commands are:
  * The actual stack size should be set in the call
  * to task_create().
  */
+ /**
 int roboclaw_main(int argc, char *argv[])
 {
 
@@ -141,12 +142,12 @@ int roboclaw_main(int argc, char *argv[])
 
 		if (thread_running) {
 			printf("roboclaw already running\n");
-			/* this is not an error */
+			// this is not an error
 			return 0;
 		}
 
 		RoboClaw::taskShouldExit = false;
-		deamon_task = px4_task_spawn_cmd("roboclaw",
+		deamon_task = px4_task_spawn_cmd("roboclawlistener actuator_controls_0 -r 10",
 						 SCHED_DEFAULT,
 						 SCHED_PRIORITY_MAX - 10,
 						 2000,
@@ -173,33 +174,214 @@ int roboclaw_main(int argc, char *argv[])
 
 	usage();
 	return 1;
+}*/
+int roboclaw_main(int argc, char *argv[])
+{
+	const char *command = nullptr;
+
+	// parse
+	if (argc == 1) { command = "help";
+	} else if (argc > 1) { command = argv[1];
+	} else { errx(1, "wrong number of args"); }
+
+	// handle
+	if (!strcmp(command, "help")) {
+		warnx("usage: (start|stop|status|test|reset)");
+		return OK;
+
+	} else if (!strcmp(command, "start")) {
+		if (thread_running) {
+			warnx("already running");
+			return 0;
+		}
+
+		thread_should_exit = false;
+		daemon_task = px4_task_spawn_cmd("roboclaw",
+          						 SCHED_DEFAULT,
+          						 SCHED_PRIORITY_MAX - 10,
+          						 2000,
+          						 roboclaw_thread_main,
+					     (argv) ? (char* const *)&argv[2] : (char* const*)NULL);
+		return 0;
+
+	} else if (!strcmp(command, "stop")) {
+		thread_should_exit = true;
+		int loop_count = 0;
+
+		while (thread_running == true) {
+			usleep(1000000);
+
+			if (loop_count++ > 5) {
+				warnx("forcing deletion");
+				task_delete(daemon_task);
+			}
+
+			warnx("waiting for process to exit");
+		}
+
+		return 0;
+
+	} else if (!strcmp(command, "status")) {
+		if (thread_running) {
+			warnx("is running");
+			return 0;
+
+		} else {
+			warnx("not started");
+			return -1;
+		}
+
+	} else if (!strcmp(command, "test")) {
+		if (thread_running) {
+			warnx("must stop first");
+			return -1;
+
+		} else if (test_thread_running) {
+			warnx("test already running");
+
+		} else {
+			daemon_task = px4_task_spawn_cmd("roboclaw_test",
+						     SCHED_DEFAULT,
+						     SCHED_PRIORITY_MAX - 30,
+						     2000,
+						     roboclaw_test_main,
+						     (argv) ? (char* const*)&argv[2] :
+						     (char* const*)NULL);
+			return 0;
+		}
+
+	} else if (!strcmp(command, "reset")) {
+		if (thread_running) {
+			warnx("not implemented");
+			return 0;
+
+		} else {
+			warnx("not started");
+			return -1;
+		}
+
+	} else {
+		errx(1, "unknown command: %s", command);
+          usage();
+	}
+
+	return OK;
 }
 
 int roboclaw_thread_main(int argc, char *argv[])
 {
 	printf("[roboclaw] starting\n");
+	const char *port = "/dev/ttyS3";
+	uint8_t address = 128;
+	uint32_t timeout = 10; // 1 second
+	bool doack = false; // do ack for writes
 
-	// skip parent process args
-	argc -= 2;
-	argv += 2;
+	// parse
+	if (argc == 3) {
+		port = argv[1];
+		address = strtoul(argv[2], nullptr, 0);
+	} else if (argc != 1) { errx(1, "wrong number of args"); }
 
-	if (argc < 2) {
-		printf("usage: roboclaw start <device> <baud>\n");
-		return -1;
+	warnx("starting");
+	thread_running = true;
+	Px4RoboClawDevice roboclaw(port, address, timeout, doack);
+	while (!thread_should_exit) { roboclaw.update(); }
+     // roboclaw.taskMain();
+	warnx("exiting.");
+	thread_running = false;
+	return 0;
+}
+
+
+int roboclaw_test_main(int argc, char *argv[])
+{
+	test_thread_running = true;
+	// defaults
+	const char *port = "/dev/ttyS3";
+	uint8_t address = 128;
+	//bool doack = false; // do ack for writes
+
+	// parse
+	if (argc == 3) {
+		port = argv[1];
+		address = strtoul(argv[2], nullptr, 0);
+
+	} else if (argc != 1) {
+		errx(1, "wrong number of args");
 	}
 
-	const char *deviceName = argv[1];
-	const char *baudRate = argv[2];
+	printf("starting new test.\n");
 
-	// start
-	RoboClaw roboclaw(deviceName, baudRate);
+	// open port
+	int uart = open(port, O_RDWR | O_NONBLOCK | O_NOCTTY);
 
-	thread_running = true;
+	if (uart < 0) {
+		errx(1, "failed to open port: %s", port);
+		return 0;
+	}
 
-	roboclaw.taskMain();
+	// setup uart
+	warnx("setting up uart");
+	struct termios uart_config;
+	int ret = tcgetattr(uart, &uart_config);
 
-	// exit
-	printf("[roboclaw] exiting.\n");
-	thread_running = false;
+	if (ret < 0) { errx(1, "failed to get attr"); }
+	uart_config.c_oflag &= ~ONLCR; // no CR for every LF
+	ret = cfsetispeed(&uart_config, B38400);
+	if (ret < 0) { errx(1, "failed to set input speed"); }
+	ret = cfsetospeed(&uart_config, B38400);
+	if (ret < 0) { errx(1, "failed to set output speed"); }
+	ret = tcsetattr(uart, TCSANOW, &uart_config);
+	if (ret < 0) { errx(1, "failed to set attr"); }
+	// clear old data
+	tcflush(uart, TCIOFLUSH);
+
+	// message data
+	uint8_t get_version = 21;
+	char msg[200];
+	char buf[10];
+
+	// request version
+	printf("requesting version\n");
+	write(uart, &address, 1);
+	write(uart, &get_version, 1);
+
+     printf("reading version with poll\n");
+     struct pollfd uartPoll;
+     uint32_t tout = 1000;
+     uartPoll.fd = uart;
+     uartPoll.events = POLLIN;
+	// read version with poll
+     while (true) {
+          int pollrc = poll(&uartPoll, 1, tout);
+          if (pollrc < 1) { break; }
+          ret = ::read(uart, buf, sizeof(buf));
+          if (ret < 1) { break; }
+          strncat(msg, (const char *)buf, ret);
+     }
+     printf("poll msg: %s\n", msg);
+     msg[0] = '\0';
+
+	// request version
+	printf("requesting version\n");
+	write(uart, &address, 1);
+	write(uart, &get_version, 1);
+     // read version w/o poll
+     printf("reading version w/o poll\n");
+     msg[0] = '\0';
+     for (int i = 0; i < 10000; i++) {
+          ret = ::read(uart, buf, sizeof(buf));
+          if (ret < 1) { continue; }
+          strncat(msg, (const char *)buf, ret);
+     }
+     printf("no poll msg: %s\n", msg);
+     // close uart
+     close(uart);
+
+     RoboClawAlt roboclawTest(port, "38400");
+     while (!thread_should_exit) { roboclawTest.drive(0.5); }
+     roboclawTest.drive(0.0);
+
+	test_thread_running = false;
 	return 0;
 }

@@ -1649,6 +1649,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("VFR_HUD", 10.0f);
 		configure_stream_local("VIBRATION", 0.5f);
 		configure_stream_local("WIND_COV", 10.0f);
+		configure_stream_local("WHEEL_ENCODERS_DATA", 10.0f);
 		break;
 
 	case MAVLINK_MODE_EXTVISION:

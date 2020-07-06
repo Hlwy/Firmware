@@ -68,7 +68,7 @@
 /**
  * This is a driver for the RoboClaw motor controller
  */
-class RoboClaw
+class RoboClawAlt
 {
 public:
 
@@ -95,12 +95,12 @@ public:
 	 * 	(selectable on roboclaw)
 	 * @param baudRateParam Name of the parameter that holds the baud rate of this serial port
 	 */
-	RoboClaw(const char *deviceName, const char *baudRateParam);
+	RoboClawAlt(const char *deviceName, const char *baudRateParam);
 
 	/**
 	 * deconstructor
 	 */
-	virtual ~RoboClaw();
+	virtual ~RoboClawAlt();
 
 	/**
 	 * @return position of a motor, rev

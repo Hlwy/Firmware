@@ -15,6 +15,8 @@
 #define GCC_VERSION (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
 #endif
 
+using namespace std;
+
 enum{	M1FORWARD = 0,
           M1BACKWARD = 1,
           SETMINMB = 2,
@@ -108,18 +110,15 @@ enum{	M1FORWARD = 0,
           GETPWMMODE                    = 149,
           FLAGBOOTLOADER                = 255
 };
-
-using namespace std;
-
 class RoboClaw{
-     // px4 added
+private:
      int uart;
 	struct pollfd uartPoll[1];
+     uint8_t _add = 128;
+	uint32_t _timeout;
+	bool ack;
+     int max_retry_attempts = 1;
 
-	uint32_t timeout;
-	bool ack;	//ack mode only supported on 3.1.8 and newer firmware
-     int max_retry_attempts;
-private:
 	uint16_t crc;
 	void crc_clear();
 	void crc_update (uint8_t data);
@@ -127,21 +126,20 @@ private:
 
 	void flush();
 	int available();
-     void HandleReadError();
-	bool write(uint8_t byte);
+
+	int write(uint8_t byte);
 	bool write_n(uint8_t byte,...);
 
-	// uint8_t read();
 	uint8_t read(uint32_t timeout);
 	bool read_n(uint8_t byte,uint8_t address,uint8_t cmd,...);
 	uint32_t Read4_1(uint8_t address,uint8_t cmd,uint8_t *status,bool *valid);
-	// uint32_t Read4(uint8_t address,uint8_t cmd,bool *valid);
+	uint32_t Read4(uint8_t address,uint8_t cmd,bool *valid);
 	uint16_t Read2(uint8_t address,uint8_t cmd,bool *valid);
 	uint8_t Read1(uint8_t address,uint8_t cmd,bool *valid);
 
 public:
 
-	RoboClaw(const char *port, uint32_t tout, bool doack = false);	//ack option only available on 3.1.8 and newer firmware
+	RoboClaw(const char *port, uint8_t address, uint32_t tout, bool doack = false);
 	~RoboClaw();
 
 	/*********************************************
@@ -262,7 +260,6 @@ public:
 	bool WriteNVM();
 	bool ReadNVM();
 	uint16_t ReadError(bool *valid=NULL);
-	uint8_t ReadError(bool *valid=NULL);
 	bool ResetEncoders();
 	bool ReadVersion(char *version);
 	bool RestoreDefaults();

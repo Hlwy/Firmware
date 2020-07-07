@@ -51,16 +51,15 @@
 
 #include <systemlib/err.h>
 #include <systemlib/mavlink_log.h>
-
+#include <drivers/drv_hrt.h>
 
 #include <uORB/Publication.hpp>
 #include <uORB/topics/debug_key_value.h>
-#include <drivers/drv_hrt.h>
-#include <math.h>
 
 // The RoboClaw has a serial communication timeout of 10ms.
 // Add a little extra to account for timing inaccuracy
 #define TIMEOUT_US 10500
+#define TIMEOUT_MS TIMEOUT_US/10
 
 // If a timeout occurs during serial communication, it will immediately try again this many times
 #define TIMEOUT_RETRIES 1
@@ -78,173 +77,318 @@
 bool RoboClaw::taskShouldExit = false;
 
 RoboClaw::RoboClaw(const char *deviceName, const char *baudRateParam):
-	_uart(0),
-	_uart_set(),
-	_uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US},
-	_actuatorsSub(-1),
-	_lastEncoderCount{0, 0},
-	_encoderCounts{0, 0},
-	_motorSpeeds{0, 0}
-
+	_lastEncoderCount{0, 0}, _encoderCounts{0, 0}, _motorSpeeds{0, 0},
+	m_error(ROBO_ERROR_NONE), m_timeErrorSent(0), m_timeActuatorCommand(0),
+	m_timeUpdate(0), m_motor1Overflows(0), m_motor2Overflows(0)
 {
+	loop_cnt = 0;
+	int baudRate;
 	_param_handles.actuator_write_period_ms = 	param_find("RBCLW_WRITE_PER");
 	_param_handles.encoder_read_period_ms = 	param_find("RBCLW_READ_PER");
 	_param_handles.counts_per_rev = 			param_find("RBCLW_COUNTS_REV");
 	_param_handles.serial_baud_rate = 			param_find(baudRateParam);
-	_param_handles.address = 					param_find("RBCLW_ADDRESS");
-
+	_param_handles.address = 				param_find("RBCLW_ADDRESS");
 	_parameters_update();
+	param_get(_param_handles.serial_baud_rate, &baudRate);
 
-	// start serial port
-	_uart = open(deviceName, O_RDWR | O_NOCTTY);
-
-	if (_uart < 0) { err(1, "could not open %s", deviceName); }
-
-	int ret = 0;
-	struct termios uart_config {};
-	ret = tcgetattr(_uart, &uart_config);
-
-	if (ret < 0) { err(1, "failed to get attr"); }
-
-	uart_config.c_oflag &= ~ONLCR; // no CR for every LF
-	ret = cfsetispeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set input speed"); }
-
-	ret = cfsetospeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set output speed"); }
-
-	ret = tcsetattr(_uart, TCSANOW, &uart_config);
-
-	if (ret < 0) { err(1, "failed to set attr"); }
-
-	FD_ZERO(&_uart_set);
-
-	// setup default settings, reset encoders
-	resetEncoders();
-}
-
-RoboClaw::~RoboClaw()
-{
-	setMotorDutyCycle(MOTOR_1, 0.0);
-	setMotorDutyCycle(MOTOR_2, 0.0);
-	close(_uart);
-}
-
-void RoboClaw::taskMain()
-{
-	// Make sure the Roboclaw is actually connected, so I don't just spam errors if it's not.
-	uint8_t rbuff[4];
-	int err_code = _transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
-
-	if (err_code <= 0) {
+	// int err = m_roboclaw.init_serial(deviceName, (uint8_t)_parameters.address, baudRate, (uint32_t)TIMEOUT_MS, false );
+	int err = m_roboclaw.init_serial(deviceName, (uint8_t)_parameters.address, baudRate, (uint32_t)1000, false );
+	if(err < 0){
 		PX4_ERR("Unable to connect to Roboclaw. Shutting down Roboclaw driver.");
-		return;
+		exit(-1);
 	}
 
-	// This main loop performs two different tasks, asynchronously:
-	// - Send actuator_controls_0 to the Roboclaw as soon as they are available
-	// - Read the encoder values at a constant rate
-	// To do this, the timeout on the poll() function is used.
-	// waitTime is the amount of time left (int microseconds) until the next time I should read from the encoders.
-	// It is updated at the end of every loop. Sometimes, if the actuator_controls_0 message came in right before
-	// I should have read the encoders, waitTime will be 0. This is fine. When waitTime is 0, poll() will return
-	// immediately with a timeout. (Or possibly with a message, if one happened to be available at that exact moment)
-	uint64_t encoderTaskLastRun = 0;
-	int waitTime = 0;
+	printf("Roboclaw successfully initialized with the following parameters:\n");
+	printf(" -- RBCLW_PORT         = %s\n", deviceName);
+	printf(" -- RBCLW_ADDRESS      = %d\n", int(_parameters.address));
+	printf(" -- RBCLW_BAUD         = %d\n", baudRate);
+	printf(" -- RBCLW_WRITE_PER    = %d\n", int(_parameters.actuator_write_period_ms));
+	printf(" -- RBCLW_READ_PER     = %d\n", int(_parameters.encoder_read_period_ms));
 
+	m_roboclaw.WriteNVM();
+	m_roboclaw.DutyM1M2((uint16_t) 0, (uint16_t) 0);
+	m_roboclaw.ResetEncoders();
+	char version[200];
+	m_roboclaw.ReadVersion(version);
+	printf(" -- ROBOCLAW VERSION   = %s\n", version);
+	printf(" -------------------------- \n");
+	printf("  \n");
+	// // start serial port
+	// _uart = open(deviceName, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	// if (_uart < 0) { err(1, "could not open %s", deviceName); }
+	// int ret = 0;
+	// struct termios uart_config {};
+	// ret = tcgetattr(_uart, &uart_config);
+	// if (ret < 0) { err(1, "failed to get attr"); }
+	// uart_config.c_oflag &= ~ONLCR; // no CR for every LF
+	// ret = cfsetispeed(&uart_config, _parameters.serial_baud_rate);
+	// if (ret < 0) { err(1, "failed to set input speed"); }
+	// ret = cfsetospeed(&uart_config, _parameters.serial_baud_rate);
+	// if (ret < 0) { err(1, "failed to set output speed"); }
+	// ret = tcsetattr(_uart, TCSANOW, &uart_config);
+	// if (ret < 0) { err(1, "failed to set attr"); }
+	// FD_ZERO(&_uart_set);
+	// // setup default settings, reset encoders
+	// resetEncoders();
+}
+RoboClaw::~RoboClaw(){ m_roboclaw.DutyM1M2((uint16_t) 0, (uint16_t) 0); }
+
+void stepOnce(){}
+
+void RoboClaw::taskMain(){
+	int waitTime = 0;
+	uint64_t encoderTaskLastRun = 0;
 	uint64_t actuatorsLastWritten = 0;
 
 	_actuatorsSub = orb_subscribe(ORB_ID(actuator_controls_0));
 	orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
-
 	_armedSub = orb_subscribe(ORB_ID(actuator_armed));
 	_paramSub = orb_subscribe(ORB_ID(parameter_update));
 
 	pollfd fds[3];
-	fds[0].fd = _paramSub;
-	fds[0].events = POLLIN;
-	fds[1].fd = _actuatorsSub;
-	fds[1].events = POLLIN;
-	fds[2].fd = _armedSub;
-	fds[2].events = POLLIN;
+	fds[0].fd = _paramSub;		fds[0].events = POLLIN;
+	fds[1].fd = _actuatorsSub;	fds[1].events = POLLIN;
+	fds[2].fd = _armedSub;		fds[2].events = POLLIN;
 
-	memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
-	_wheelEncoderMsg[0].pulses_per_rev = _parameters.counts_per_rev;
-	_wheelEncoderMsg[1].pulses_per_rev = _parameters.counts_per_rev;
+	// memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
+	_wheelEncoderMsg.pulses_per_rev[0] = _parameters.counts_per_rev;
+	_wheelEncoderMsg.pulses_per_rev[1] = _parameters.counts_per_rev;
 
 	while (!taskShouldExit) {
-
 		int pret = poll(fds, sizeof(fds) / sizeof(pollfd), waitTime / 1000);
 
-		bool actuators_timeout = int(hrt_absolute_time() - actuatorsLastWritten) > 2000 * _parameters.actuator_write_period_ms;
+		uint64_t now = hrt_absolute_time();
+		bool error_status_valid = false;
+		uint8_t error = m_roboclaw.ReadError(&error_status_valid);
+		if (!error_status_valid) { error = m_error; }
+		m_error = error;
 
-		if (fds[0].revents & POLLIN) {
+		bool actuators_timeout = int(hrt_absolute_time() - actuatorsLastWritten) > 2000 * _parameters.actuator_write_period_ms;
+		if(fds[0].revents & POLLIN){
 			orb_copy(ORB_ID(parameter_update), _paramSub, &_paramUpdate);
 			_parameters_update();
 		}
 
+		int32_t timeElapsed = now - m_timeUpdate;
+		m_timeUpdate = now;
+		float freq = 1.0e6 / timeElapsed;
+		if (freq < 30.0f && m_timeUpdate != 0) { printf("[ROBO] slow, %10.2f Hz\n", double(freq)); }
+
 		// No timeout, update on either the actuator controls or the armed state
-		if (pret > 0 && (fds[1].revents & POLLIN || fds[2].revents & POLLIN || actuators_timeout)) {
+		if(pret > 0 && (fds[1].revents & POLLIN || fds[2].revents & POLLIN || actuators_timeout)) {
 			orb_copy(ORB_ID(actuator_controls_0), _actuatorsSub, &_actuatorControls);
 			orb_copy(ORB_ID(actuator_armed), _armedSub, &_actuatorArmed);
 
-			int drive_ret = 0, turn_ret = 0;
-
-			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown
-					      || _actuatorArmed.force_failsafe || actuators_timeout;
-
-			if (disarmed) {
-				// If disarmed, I want to be certain that the stop command gets through.
+			// int drive_ret = 0, turn_ret = 0;
+			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown || _actuatorArmed.force_failsafe || actuators_timeout;
+			if(disarmed){   // If disarmed, I want to be certain that the stop command gets through.
 				int tries = 0;
-
-				while (tries < STOP_RETRIES && ((drive_ret = drive(0.0)) <= 0 || (turn_ret = turn(0.0)) <= 0)) {
-					PX4_ERR("Error trying to stop: Drive: %d, Turn: %d", drive_ret, turn_ret);
+				while(tries < STOP_RETRIES && (!m_roboclaw.DutyM1M2((uint16_t) 0, (uint16_t) 0))) {
 					tries++;
+					// PX4_ERR("Error trying to stop: Drive: %d, Turn: %d", drive_ret, turn_ret);
 					px4_usleep(TIMEOUT_US);
 				}
-
 			} else {
-				drive_ret = drive(_actuatorControls.control[actuator_controls_s::INDEX_THROTTLE]);
-				turn_ret = turn(_actuatorControls.control[actuator_controls_s::INDEX_YAW]);
-
-				if (drive_ret <= 0 || turn_ret <= 0) {
-					PX4_ERR("Error controlling RoboClaw. Drive err: %d. Turn err: %d", drive_ret, turn_ret);
-				}
+				m_timeActuatorCommand = now;
+				float linVel = _actuatorControls.control[0];
+				float angVel = _actuatorControls.control[1];
+				// printf("Received Raw Commands = %f, %f\n", (double)linVel, (double)angVel);
+				drive(linVel, angVel);
 			}
-
 			actuatorsLastWritten = hrt_absolute_time();
-
+			if(now - m_timeActuatorCommand > 1000000) { m_timeActuatorCommand = now; }
 		} else {
+			m_roboclaw.flush();
 			// A timeout occurred, which means that it's time to update the encoders
 			encoderTaskLastRun = hrt_absolute_time();
-
 			if (readEncoder() > 0) {
-
+				_wheelEncoderMsg.timestamp = encoderTaskLastRun;
 				for (int i = 0; i < 2; i++) {
-					_wheelEncoderMsg[i].timestamp = encoderTaskLastRun;
-
-					_wheelEncoderMsg[i].encoder_position = _encoderCounts[i];
-					_wheelEncoderMsg[i].speed = _motorSpeeds[i];
-
-					_wheelEncodersAdv[i].publish(_wheelEncoderMsg[i]);
+					_wheelEncoderMsg.encoder_position[i] = _encoderCounts[i];
+					_wheelEncoderMsg.speed[i] = _motorSpeeds[i];
 				}
-
-			} else {
-				PX4_ERR("Error reading encoders");
+				_wheelEncodersAdv[0].publish(_wheelEncoderMsg);
 			}
 		}
 
 		waitTime = _parameters.encoder_read_period_ms * 1000 - (hrt_absolute_time() - encoderTaskLastRun);
 		waitTime = waitTime < 0 ? 0 : waitTime;
+		loop_cnt += 1;
 	}
 
 	orb_unsubscribe(_actuatorsSub);
 	orb_unsubscribe(_armedSub);
 	orb_unsubscribe(_paramSub);
 }
+void RoboClaw::drive(float v, float w){
+	int32_t _qpps_per_meter = 9565;
+	double _base_width = 2.0;
+	int _cmd_turn_dir_sign = 1, _left_dir = 1, _right_dir = 1;
 
+	// if(fabs(v) > this->_max_speed) v= this->_max_speed;
+
+     //   Differential Drive Drive Equations
+     float v_left = (double) v - (_cmd_turn_dir_sign * (double) w) * (_base_width / 2.0);
+     float v_right = (double) v + (_cmd_turn_dir_sign *(double)  w) * (_base_width / 2.0);
+
+     float left_spd = (double) v_left * _qpps_per_meter * _left_dir;
+     float right_spd = (double) v_right * _qpps_per_meter * _right_dir;
+	m_roboclaw.SpeedM1M2((int32_t)(left_spd), (int32_t)(right_spd));
+}
+
+// int RoboClaw::readEncoder(){
+// 	bool valid1, valid2;
+// 	uint8_t status1, status2;
+// 	uint32_t counts1, counts2;
+// 	/** Query roboclaws for information related to current motor velocities first */
+// 	bool success = m_roboclaw.ReadEncoders(counts1, counts2);
+// 	uint32_t pps1 = m_roboclaw.ReadSpeedM1(&status1,&valid1);
+// 	uint32_t pps2 = m_roboclaw.ReadSpeedM2(&status2,&valid2);
+// 	printf("Encoders #%d: -- V1 (C1) = %d (%d)\n", loop_cnt, (int) pps1, (int) counts1);
+// 	printf("Encoders #%d: -- V2 (C2) = %d (%d)\n", loop_cnt, (int) pps2, (int) counts2);
+//
+// 	bool all_data_valid = success && valid1 && valid2;
+// 	if (!all_data_valid) {
+// 		printf("Errors = %d, %d, %d\n", (int) success, (int) valid1, (int) valid2);
+// 		printf("Error reading encoders\n");
+// 		// PX4_ERR("Error reading encoders");
+// 		return -1;
+// 	}
+//
+// 	/** Convert motor motion information into user-friendly format */
+// 	// float leftM1Vel = (float) ((int32_t) leftM1Pps) / (float) this->_qpps_per_meter;
+// 	// float leftM2Vel = (float) ((int32_t) leftM2Pps) / (float) this->_qpps_per_meter;
+//
+// 	// encoder_data.position[0] = encoderToInt64(counts, status_counts, &m_motor1Overflows);
+// 	// encoder_data.distance[0] = (float) (encoder_data.position[0]) / (float) DEFAULT_COUNTS_PER_METER;
+// 	// encoder_data.position[1] = encoderToInt64(counts, status_counts, &m_motor2Overflows);
+// 	// encoder_data.distance[1] = (float) (encoder_data.position[1]) / (float) DEFAULT_COUNTS_PER_METER;
+// 	//
+// 	// encoder_data.qpps[0] = spd;
+// 	// encoder_data.velocity[0] = (float) (spd) / (float) DEFAULT_COUNTS_PER_METER;
+// 	// encoder_data.qpps[1] = spd;
+// 	// encoder_data.velocity[1] = (float) (spd) / (float) DEFAULT_COUNTS_PER_METER;
+// 	// printf("[ROBO] ENCD 1 READ PPS = %f\r\n", tmpQpps);
+// 	// printf("[ROBO] ENCD 2 READ PPS = %f\r\n", tmpQpps);
+//
+// 	_wheelEncoderMsg.encoder_position[0] = counts1;
+// 	_wheelEncoderMsg.encoder_position[1] = counts2;
+// 	_wheelEncoderMsg.speed[0] = pps1;
+// 	_wheelEncoderMsg.speed[1] = pps2;
+//
+// 	return 1;
+// }
+
+
+// void RoboClaw::taskMain()
+// {
+// 	// Make sure the Roboclaw is actually connected, so I don't just spam errors if it's not.
+// 	uint8_t rbuff[4];
+// 	int err_code = _transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
+//
+// 	if (err_code <= 0) {
+// 	// 	PX4_ERR("Unable to connect to Roboclaw. Shutting down Roboclaw driver.");
+// 	// 	return;
+// 	}
+//
+// 	// This main loop performs two different tasks, asynchronously:
+// 	// - Send actuator_controls_0 to the Roboclaw as soon as they are available
+// 	// - Read the encoder values at a constant rate
+// 	// To do this, the timeout on the poll() function is used.
+// 	// waitTime is the amount of time left (int microseconds) until the next time I should read from the encoders.
+// 	// It is updated at the end of every loop. Sometimes, if the actuator_controls_0 message came in right before
+// 	// I should have read the encoders, waitTime will be 0. This is fine. When waitTime is 0, poll() will return
+// 	// immediately with a timeout. (Or possibly with a message, if one happened to be available at that exact moment)
+// 	uint64_t encoderTaskLastRun = 0;
+// 	int waitTime = 0;
+//
+// 	uint64_t actuatorsLastWritten = 0;
+//
+// 	_actuatorsSub = orb_subscribe(ORB_ID(actuator_controls_0));
+// 	orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
+//
+// 	_armedSub = orb_subscribe(ORB_ID(actuator_armed));
+// 	_paramSub = orb_subscribe(ORB_ID(parameter_update));
+//
+// 	pollfd fds[3];
+// 	fds[0].fd = _paramSub;
+// 	fds[0].events = POLLIN;
+// 	fds[1].fd = _actuatorsSub;
+// 	fds[1].events = POLLIN;
+// 	fds[2].fd = _armedSub;
+// 	fds[2].events = POLLIN;
+//
+// 	// memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
+// 	_wheelEncoderMsg.pulses_per_rev[0] = _parameters.counts_per_rev;
+// 	_wheelEncoderMsg.pulses_per_rev[1] = _parameters.counts_per_rev;
+//
+// 	while (!taskShouldExit) {
+//
+// 		int pret = poll(fds, sizeof(fds) / sizeof(pollfd), waitTime / 1000);
+//
+// 		bool actuators_timeout = int(hrt_absolute_time() - actuatorsLastWritten) > 2000 * _parameters.actuator_write_period_ms;
+// 		drive(0.2);
+// 		turn(0.0);
+// 		if (fds[0].revents & POLLIN) {
+// 			orb_copy(ORB_ID(parameter_update), _paramSub, &_paramUpdate);
+// 			_parameters_update();
+// 		}
+//
+// 		// No timeout, update on either the actuator controls or the armed state
+// 		if (pret > 0 && (fds[1].revents & POLLIN || fds[2].revents & POLLIN || actuators_timeout)) {
+// 			orb_copy(ORB_ID(actuator_controls_0), _actuatorsSub, &_actuatorControls);
+// 			orb_copy(ORB_ID(actuator_armed), _armedSub, &_actuatorArmed);
+//
+// 			int drive_ret = 0, turn_ret = 0;
+//
+// 			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown
+// 					      || _actuatorArmed.force_failsafe || actuators_timeout;
+//
+// 			if (disarmed) {
+// 				// If disarmed, I want to be certain that the stop command gets through.
+// 				int tries = 0;
+//
+// 				while (tries < STOP_RETRIES && ((drive_ret = drive(0.0)) <= 0 || (turn_ret = turn(0.0)) <= 0)) {
+// 					PX4_ERR("Error trying to stop: Drive: %d, Turn: %d", drive_ret, turn_ret);
+// 					tries++;
+// 					px4_usleep(TIMEOUT_US);
+// 				}
+//
+// 			} else {
+// 				drive_ret = drive(_actuatorControls.control[0]);
+// 				turn_ret = turn(_actuatorControls.control[1]);
+//
+// 				if (drive_ret <= 0 || turn_ret <= 0) {
+// 					PX4_ERR("Error controlling RoboClaw. Drive err: %d. Turn err: %d", drive_ret, turn_ret);
+// 				}
+// 			}
+//
+// 			actuatorsLastWritten = hrt_absolute_time();
+//
+// 		} else {
+// 			// A timeout occurred, which means that it's time to update the encoders
+// 			encoderTaskLastRun = hrt_absolute_time();
+// 			if (readEncoder() > 0) {
+// 				_wheelEncoderMsg.timestamp = encoderTaskLastRun;
+// 				for (int i = 0; i < 2; i++) {
+// 					_wheelEncoderMsg.encoder_position[i] = _encoderCounts[i];
+// 					_wheelEncoderMsg.speed[i] = _motorSpeeds[i];
+// 				}
+// 				_wheelEncodersAdv[0].publish(_wheelEncoderMsg);
+//
+// 			} else {
+// 				PX4_ERR("Error reading encoders");
+// 			}
+// 		}
+//
+// 		waitTime = _parameters.encoder_read_period_ms * 1000 - (hrt_absolute_time() - encoderTaskLastRun);
+// 		waitTime = waitTime < 0 ? 0 : waitTime;
+// 	}
+//
+// 	orb_unsubscribe(_actuatorsSub);
+// 	orb_unsubscribe(_armedSub);
+// 	orb_unsubscribe(_paramSub);
+// }
 int RoboClaw::readEncoder()
 {
 
@@ -258,11 +402,11 @@ int RoboClaw::readEncoder()
 	bool success = false;
 
 	for (int retry = 0; retry < TIMEOUT_RETRIES && !success; retry++) {
-		success = _transaction(CMD_READ_BOTH_ENCODERS, nullptr, 0, &rbuff_pos[0], ENCODER_MESSAGE_SIZE, false,
+		success = m_roboclaw.transaction(GETENCODERS, nullptr, 0, &rbuff_pos[0], ENCODER_MESSAGE_SIZE, false,
 				       true) == ENCODER_MESSAGE_SIZE;
-		success = success && _transaction(CMD_READ_SPEED_1, nullptr, 0, &rbuff_speed[0], ENCODER_SPEED_MESSAGE_SIZE, false,
+		success = success && m_roboclaw.transaction(GETM1SPEED, nullptr, 0, &rbuff_speed[0], ENCODER_SPEED_MESSAGE_SIZE, false,
 						  true) == ENCODER_SPEED_MESSAGE_SIZE;
-		success = success && _transaction(CMD_READ_SPEED_2, nullptr, 0, &rbuff_speed[4], ENCODER_SPEED_MESSAGE_SIZE, false,
+		success = success && m_roboclaw.transaction(GETM2SPEED, nullptr, 0, &rbuff_speed[4], ENCODER_SPEED_MESSAGE_SIZE, false,
 						  true) == ENCODER_SPEED_MESSAGE_SIZE;
 	}
 
@@ -311,7 +455,6 @@ int RoboClaw::readEncoder()
 
 	return 1;
 }
-
 void RoboClaw::printStatus(char *string, size_t n)
 {
 	snprintf(string, n, "pos1,spd1,pos2,spd2: %10.2f %10.2f %10.2f %10.2f\n",
@@ -320,7 +463,6 @@ void RoboClaw::printStatus(char *string, size_t n)
 		 double(getMotorPosition(MOTOR_2)),
 		 double(getMotorSpeed(MOTOR_2)));
 }
-
 float RoboClaw::getMotorPosition(e_motor motor)
 {
 	if (motor == MOTOR_1) {
@@ -334,7 +476,6 @@ float RoboClaw::getMotorPosition(e_motor motor)
 		return NAN;
 	}
 }
-
 float RoboClaw::getMotorSpeed(e_motor motor)
 {
 	if (motor == MOTOR_1) {
@@ -348,7 +489,6 @@ float RoboClaw::getMotorSpeed(e_motor motor)
 		return NAN;
 	}
 }
-
 int RoboClaw::setMotorSpeed(e_motor motor, float value)
 {
 	e_command command;
@@ -376,7 +516,6 @@ int RoboClaw::setMotorSpeed(e_motor motor, float value)
 
 	return _sendUnsigned7Bit(command, value);
 }
-
 int RoboClaw::setMotorDutyCycle(e_motor motor, float value)
 {
 
@@ -395,24 +534,20 @@ int RoboClaw::setMotorDutyCycle(e_motor motor, float value)
 
 	return _sendSigned16Bit(command, value);
 }
-
 int RoboClaw::drive(float value)
 {
 	e_command command = value >= 0 ? CMD_DRIVE_FWD_MIX : CMD_DRIVE_REV_MIX;
 	return _sendUnsigned7Bit(command, value);
 }
-
 int RoboClaw::turn(float value)
 {
 	e_command command = value >= 0 ? CMD_TURN_LEFT : CMD_TURN_RIGHT;
 	return _sendUnsigned7Bit(command, value);
 }
-
 int RoboClaw::resetEncoders()
 {
 	return _sendNothing(CMD_RESET_ENCODERS);
 }
-
 int RoboClaw::_sendUnsigned7Bit(e_command command, float data)
 {
 	data = fabs(data);
@@ -425,7 +560,6 @@ int RoboClaw::_sendUnsigned7Bit(e_command command, float data)
 	uint8_t recv_byte;
 	return _transaction(command, &byte, 1, &recv_byte, 1);
 }
-
 int RoboClaw::_sendSigned16Bit(e_command command, float data)
 {
 	if (data > 1.0f) {
@@ -439,13 +573,11 @@ int RoboClaw::_sendSigned16Bit(e_command command, float data)
 	uint8_t recv_buff;
 	return _transaction(command, (uint8_t *) &buff, 2, &recv_buff, 1);
 }
-
 int RoboClaw::_sendNothing(e_command command)
 {
 	uint8_t recv_buff;
 	return _transaction(command, nullptr, 0, &recv_buff, 1);
 }
-
 uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init)
 {
 	uint16_t crc = init;
@@ -465,7 +597,6 @@ uint16_t RoboClaw::_calcCRC(const uint8_t *buf, size_t n, uint16_t init)
 
 	return crc;
 }
-
 int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 			   uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
 {
@@ -473,7 +604,7 @@ int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 
 	// WRITE
 
-	tcflush(_uart, TCIOFLUSH); // flush  buffers
+	tcflush(_uart, TCIFLUSH); // flush  buffers
 	uint8_t buf[wbytes + 4];
 	buf[0] = (uint8_t) _parameters.address;
 	buf[1] = cmd;
@@ -559,54 +690,37 @@ int RoboClaw::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 	}
 }
 
-void RoboClaw::_parameters_update()
-{
+void RoboClaw::errorToString(uint8_t error, char *msg, size_t n){
+	char buf[200] = "[ROBO] ";
+	const char *m1oc = "m1 oc,";
+	const char *m2oc = "m2 oc,";
+	const char *estop = "estop,";
+	const char *temp = " temp,";
+	const char *mbatl = " main low,";
+	const char *mbath = " main high,";
+	const char *lbatl = " logic low,";
+	const char *lbath = " logic high,";
+
+	if (error & ROBO_ERROR_M1_OVERCURRENT) { strncat(buf, m1oc, strnlen(m1oc, 20)); }
+	if (error & ROBO_ERROR_M2_OVERCURRENT) { strncat(buf, m2oc, strnlen(m2oc, 20)); }
+	if (error & ROBO_ERROR_ESTOP) { strncat(buf, estop, strnlen(estop, 20)); }
+	if (error & ROBO_ERROR_TEMPERATURE) { strncat(buf, temp, strnlen(temp, 20)); }
+	if (error & ROBO_ERROR_MAIN_BATTERY_LOW) { strncat(buf, mbatl, strnlen(mbatl, 20)); }
+	if (error & ROBO_ERROR_MAIN_BATTERY_HIGH) { strncat(buf, mbath, strnlen(mbath, 20)); }
+	if (error & ROBO_ERROR_LOGIC_BATTERY_LOW) { strncat(buf, lbatl, strnlen(lbatl, 20)); }
+	if (error & ROBO_ERROR_LOGIC_BATTERY_HIGH) { strncat(buf, lbath, strnlen(lbath, 20)); }
+	strncpy(msg, buf, n);
+}
+int64_t RoboClaw::encoderToInt64(uint32_t count, uint8_t status, int32_t *overflows){
+	static int64_t overflowAmount = 0x100000000LL;
+	if (status & ROBO_ENCODER_OVERFLOW) { (*overflows) += 1; }
+	if (status & ROBO_ENCODER_UNDERFLOW) { (*overflows) -= 1; }
+	return int64_t(count) + (*overflows) * overflowAmount;
+}
+void RoboClaw::_parameters_update(){
 	param_get(_param_handles.counts_per_rev, &_parameters.counts_per_rev);
 	param_get(_param_handles.encoder_read_period_ms, &_parameters.encoder_read_period_ms);
 	param_get(_param_handles.actuator_write_period_ms, &_parameters.actuator_write_period_ms);
 	param_get(_param_handles.address, &_parameters.address);
-
-	if (_actuatorsSub > 0) {
-		orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
-	}
-
-	int baudRate;
-	param_get(_param_handles.serial_baud_rate, &baudRate);
-
-	switch (baudRate) {
-	case 2400:
-		_parameters.serial_baud_rate = B2400;
-		break;
-
-	case 9600:
-		_parameters.serial_baud_rate = B9600;
-		break;
-
-	case 19200:
-		_parameters.serial_baud_rate = B19200;
-		break;
-
-	case 38400:
-		_parameters.serial_baud_rate = B38400;
-		break;
-
-	case 57600:
-		_parameters.serial_baud_rate = B57600;
-		break;
-
-	case 115200:
-		_parameters.serial_baud_rate = B115200;
-		break;
-
-	case 230400:
-		_parameters.serial_baud_rate = B230400;
-		break;
-
-	case 460800:
-		_parameters.serial_baud_rate = B460800;
-		break;
-
-	default:
-		_parameters.serial_baud_rate = B2400;
-	}
+	if (_actuatorsSub > 0) { orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms); }
 }

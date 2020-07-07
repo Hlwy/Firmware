@@ -45,17 +45,22 @@
 
 #include <poll.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <termios.h>
-#include <lib/parameters/param.h>
+#include <sys/select.h>
+#include <sys/time.h>
+
+#include <uORB/uORB.h>
+#include <modules/uORB/Subscription.hpp>
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/wheel_encoders.h>
 #include <uORB/topics/actuator_armed.h>
 #include <uORB/topics/parameter_update.h>
-#include <drivers/device/i2c.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <pthread.h>
+
+#include <lib/parameters/param.h>
+
+#include "RoboclawDriver.h"
 
 /**
  * This is a driver for the RoboClaw motor controller
@@ -72,78 +77,11 @@ public:
 		CH_VOLTAGE_LEFT = 0,
 		CH_VOLTAGE_RIGHT
 	};
-
 	/**  motors */
 	enum e_motor {
 		MOTOR_1 = 0,
 		MOTOR_2
 	};
-
-	/**
-	 * constructor
-	 * @param deviceName the name of the
-	 * 	serial port e.g. "/dev/ttyS2"
-	 * @param address the adddress  of the motor
-	 * 	(selectable on roboclaw)
-	 * @param baudRateParam Name of the parameter that holds the baud rate of this serial port
-	 */
-	RoboClaw(const char *deviceName, const char *baudRateParam);
-
-	/**
-	 * deconstructor
-	 */
-	virtual ~RoboClaw();
-
-	/**
-	 * @return position of a motor, rev
-	 */
-	float getMotorPosition(e_motor motor);
-
-	/**
-	 * @return speed of a motor, rev/sec
-	 */
-	float getMotorSpeed(e_motor motor);
-
-	/**
-	 * set the speed of a motor, rev/sec
-	 */
-	int setMotorSpeed(e_motor motor, float value);
-
-	/**
-	 * set the duty cycle of a motor
-	 */
-	int setMotorDutyCycle(e_motor motor, float value);
-
-	/**
-	 * Drive both motors. +1 = full forward, -1 = full backward
-	 */
-	int drive(float value);
-
-	/**
-	 * Turn. +1 = full right, -1 = full left
-	 */
-	int turn(float value);
-
-	/**
-	 * reset the encoders
-	 * @return status
-	 */
-	int resetEncoders();
-
-	/**
-	 * read data from serial
-	 */
-	int readEncoder();
-
-	/**
-	 * print status
-	 */
-	void printStatus(char *string, size_t n);
-
-private:
-
-	// commands
-	// We just list the commands we want from the manual here.
 	enum e_command {
 
 		// simple
@@ -175,6 +113,61 @@ private:
 		CMD_READ_STATUS = 90
 	};
 
+	/**
+	 * constructor
+	 * @param deviceName the name of the
+	 * 	serial port e.g. "/dev/ttyS2"
+	 * @param address the adddress  of the motor
+	 * 	(selectable on roboclaw)
+	 * @param baudRateParam Name of the parameter that holds the baud rate of this serial port
+	 */
+	RoboClaw(const char *deviceName, const char *baudRateParam);
+
+	/**
+	 * deconstructor
+	 */
+	virtual ~RoboClaw();
+
+	/**
+	 * @return position of a motor, rev
+	 */
+	float getMotorPosition(e_motor motor);
+	/**
+	 * @return speed of a motor, rev/sec
+	 */
+	float getMotorSpeed(e_motor motor);
+	/**
+	 * set the speed of a motor, rev/sec
+	 */
+	int setMotorSpeed(e_motor motor, float value);
+	/**
+	 * set the duty cycle of a motor
+	 */
+	int setMotorDutyCycle(e_motor motor, float value);
+	/**
+	 * Drive both motors. +1 = full forward, -1 = full backward
+	 */
+	int drive(float value);
+	void drive(float v, float w);
+	/**
+	 * Turn. +1 = full right, -1 = full left
+	 */
+	int turn(float value);
+	/**
+	 * reset the encoders
+	 * @return status
+	 */
+	int resetEncoders();
+	/**
+	 * read data from serial
+	 */
+	int readEncoder();
+	/**
+	 * print status
+	 */
+	void printStatus(char *string, size_t n);
+
+private:
 	struct {
 		speed_t serial_baud_rate;
 		int32_t counts_per_rev;
@@ -182,7 +175,6 @@ private:
 		int32_t actuator_write_period_ms;
 		int32_t address;
 	} _parameters{};
-
 	struct {
 		param_t serial_baud_rate;
 		param_t counts_per_rev;
@@ -191,6 +183,7 @@ private:
 		param_t address;
 	} _param_handles{};
 
+	RoboclawDriver m_roboclaw;
 	int _uart;
 	fd_set _uart_set;
 	struct timeval _uart_timeout;
@@ -205,13 +198,32 @@ private:
 	int _paramSub{-1};
 	parameter_update_s _paramUpdate;
 
-	uORB::PublicationMulti<wheel_encoders_s> _wheelEncodersAdv[2] { ORB_ID(wheel_encoders), ORB_ID(wheel_encoders)};
-	wheel_encoders_s _wheelEncoderMsg[2];
-
+	uORB::PublicationMulti<wheel_encoders_s> _wheelEncodersAdv[1] { ORB_ID(wheel_encoders)};
+	// uORB::Publication<wheel_encoders_s> _wheelEncodersAdv { ORB_ID(wheel_encoders)};
+	wheel_encoders_s _wheelEncoderMsg{0};
+	// wheel_encoders_s _wheelEncoderMsg[2];
 	uint32_t _lastEncoderCount[2] {0, 0};
 	int64_t _encoderCounts[2] {0, 0};
 	int32_t _motorSpeeds[2] {0, 0};
 
+	// uORB::Subscription m_controls;
+	// uORB::Publication<actuator_outputs_s> m_outputs;
+	// orb_advert_t _wheelEncodersAdv { nullptr};
+	orb_advert_t _encoder_data_pub{nullptr};
+	// wheel_encoders_data_s _wheelEncoderMsg;
+	// wheel_encoders_data_s encoder_data{0};
+	uint8_t m_error;
+	uint64_t m_timeErrorSent;
+	uint64_t m_timeActuatorCommand;
+	uint64_t m_timeUpdate;
+	int32_t m_motor1Overflows;
+	int32_t m_motor2Overflows;
+	int loop_cnt;
+
+	void stepOnce();
+
+	static void errorToString(uint8_t error,char *msg, size_t n);
+	int64_t encoderToInt64(uint32_t count, uint8_t status,int32_t *overflows);
 	void _parameters_update();
 
 	static uint16_t _calcCRC(const uint8_t *buf, size_t n, uint16_t init = 0);

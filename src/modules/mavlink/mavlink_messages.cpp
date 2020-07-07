@@ -117,6 +117,7 @@
 #include <uORB/topics/vehicle_trajectory_waypoint.h>
 #include <uORB/topics/vtol_vehicle_status.h>
 #include <uORB/topics/wind_estimate.h>
+#include <uORB/topics/wheel_encoders.h>
 
 using matrix::Vector3f;
 using matrix::wrap_2pi;
@@ -5107,6 +5108,69 @@ protected:
 	}
 };
 
+class MavlinkStreamWheelEncoders : public MavlinkStream
+{
+public:
+	const char *get_name() const override
+	{
+		return MavlinkStreamWheelEncoders::get_name_static();
+	}
+
+	static constexpr const char *get_name_static()
+	{
+		return "WHEEL_ENCODERS";
+	}
+
+	static constexpr uint16_t get_id_static()
+	{
+		return MAVLINK_MSG_ID_WHEEL_ENCODERS;
+	}
+
+	uint16_t get_id() override
+	{
+		return get_id_static();
+	}
+
+	static MavlinkStream *new_instance(Mavlink *mavlink)
+	{
+		return new MavlinkStreamWheelEncoders(mavlink);
+	}
+
+	unsigned get_size() override
+	{
+		return MAVLINK_MSG_ID_WHEEL_ENCODERS_LEN + MAVLINK_NUM_NON_PAYLOAD_BYTES;
+	}
+
+private:
+	uORB::Subscription _encoders_sub{ORB_ID(wheel_encoders), 0};
+	/* do not allow top copying this class */
+	MavlinkStreamWheelEncoders(MavlinkStreamWheelEncoders &) = delete;
+	MavlinkStreamWheelEncoders &operator = (const MavlinkStreamWheelEncoders &) = delete;
+
+protected:
+	explicit MavlinkStreamWheelEncoders(Mavlink *mavlink) : MavlinkStream(mavlink)
+	{}
+
+	bool send(const hrt_abstime t) override
+	{
+		wheel_encoders_s encoders;
+
+		if (_encoders_sub.update(&encoders)) {
+			mavlink_wheel_encoders_t msg{};
+
+			msg.time_usec = encoders.timestamp;
+			memcpy(msg.encoder_position, encoders.encoder_position, sizeof(msg.encoder_position));
+			memcpy(msg.speed, encoders.speed, sizeof(msg.speed));
+			memcpy(msg.pulses_per_rev, encoders.pulses_per_rev, sizeof(msg.pulses_per_rev));
+
+			mavlink_msg_wheel_encoders_send_struct(_mavlink->get_channel(), &msg);
+
+			return true;
+		}
+
+		return false;
+	}
+};
 class MavlinkStreamObstacleDistance : public MavlinkStream
 {
 public:
@@ -5241,6 +5305,7 @@ static const StreamListItem streams_list[] = {
 	create_stream_list_item<MavlinkStreamAutopilotVersion>(),
 	create_stream_list_item<MavlinkStreamProtocolVersion>(),
 	create_stream_list_item<MavlinkStreamFlightInformation>(),
+	create_stream_list_item<MavlinkStreamWheelEncoders>(),
 	create_stream_list_item<MavlinkStreamStorageInformation>()
 };
 

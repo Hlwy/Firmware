@@ -56,6 +56,8 @@ then
 	param set PWM_DISARMED 1500
 	param set PWM_MAX 2000
 	param set PWM_MIN 1000
+	param set RBCLW_BAUD 115200
+
 fi
 
 # Configure this as rover

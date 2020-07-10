@@ -46,7 +46,7 @@ Px4RoboClawDevice::Px4RoboClawDevice(const char *port, uint8_t address, uint32_t
 	: CDev("roboclaw", "/dev/roboclaw"), m_roboclaw(port, 128, tout, doack),
 	m_controls{ORB_ID(actuator_controls_0)},
 	// // publication
-	m_outputs{ORB_ID(actuator_outputs)},
+	m_outputs{ORB_ID(actuator_controls_0)},
 	// m_encoders{ORB_ID(wheel_encoders_data)},
 	// data
 	m_mavlink_fd(-1), m_address(address), m_error(ROBO_ERROR_NONE),
@@ -105,8 +105,8 @@ int Px4RoboClawDevice::init(){
 	m_roboclaw.SetLogicVoltages(6.0 * scaleVolts, 13.0 * scaleVolts);
 	m_roboclaw.SetMainVoltages(10.0 * scaleVolts, 13.0 * scaleVolts);
 	// m_roboclaw.WriteNVM();
-	m_roboclaw.DutyM1((uint16_t) 10);
-	m_roboclaw.DutyM2((uint16_t) 10);
+	m_roboclaw.DutyM1((uint16_t) 0);
+	m_roboclaw.DutyM2((uint16_t) 0);
 	m_roboclaw.ResetEncoders();
 	char version[200];
 	m_roboclaw.ReadVersion(version);
@@ -239,10 +239,20 @@ void Px4RoboClawDevice::update()
 			}
 			// printf("Outputting Scaled Controls = %d, %d\r\n", int(duty[0] + scaleDuty), int(duty[1] + scaleDuty));
 			printf("Outputting Scaled Controls = %d, %d\r\n", int(duty[0]), int(duty[1]));
+			float v = control[0];
+			float w = control[1];
+			int32_t _qpps_per_meter = 9565;
+			double _base_width = 2.0;
+			int _cmd_turn_dir_sign = 1, _left_dir = 1, _right_dir = 1;
+			float v_left = (double) v - (_cmd_turn_dir_sign * (double) w) * (_base_width / 2.0);
+			float v_right = (double) v + (_cmd_turn_dir_sign *(double)  w) * (_base_width / 2.0);
 
+			float left_spd = (double) v_left * _qpps_per_meter * _left_dir;
+			float right_spd = (double) v_right * _qpps_per_meter * _right_dir;
 			// m_roboclaw.DutyM1((uint16_t) duty[0]);
 			// m_roboclaw.DutyM2((uint16_t) duty[1]);
-			m_roboclaw.SpeedM1M2((uint32_t) 500,(uint32_t) 500);
+			m_roboclaw.SpeedM1M2((int32_t)(left_spd), (int32_t)(right_spd));
+			// m_roboclaw.SpeedM1M2((uint32_t) control[0],(uint32_t) control[1]);
 			// m_roboclaw.DutyM1((uint16_t) duty[0] + scaleDuty);
 			// m_roboclaw.DutyM2((uint16_t) duty[1] + scaleDuty);
 		} else{ control[0] = 0; control[1] = 0; }

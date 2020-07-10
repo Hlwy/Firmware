@@ -5,3 +5,4 @@
 
 # Start MAVLink on the USB port
 mavlink start -d /dev/ttyACM0
+mavlink stream -r 10 -s WHEEL_ENCODERS_DATA -d /dev/ttyACM0

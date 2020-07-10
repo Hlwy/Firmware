@@ -21,9 +21,9 @@ RoboClaw::RoboClaw(const char *port, uint8_t address, uint32_t tout, bool doack)
 	int ret = tcgetattr(uart, &uart_config);
 	if (ret < 0) { printf("failed to get attr\r\n"); }
 
-	ret = cfsetispeed(&uart_config, B38400);
+	ret = cfsetispeed(&uart_config, B115200);
 	if (ret < 0) { printf("failed to set input speed\r\n"); exit(-1);}
-	ret = cfsetospeed(&uart_config, B38400);
+	ret = cfsetospeed(&uart_config, B115200);
 	if (ret < 0) { printf("failed to set output speed\r\n"); exit(-1);}
 
 	uart_config.c_cflag |= (CLOCAL | CREAD);		//<Set baud rate

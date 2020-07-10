@@ -192,7 +192,8 @@ else
 	param compare CBRK_BUZZER 782090
 	if [ $? != 0 -o $STARTUP_TUNE != 1 ]
 	then
-		tune_control play -t $STARTUP_TUNE
+		tune_control play -t 0
+		# tune_control play -t $STARTUP_TUNE
 	fi
 
 	#
